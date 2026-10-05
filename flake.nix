@@ -1,12 +1,13 @@
 {
-  description = "watch";
+  description = "Watch a Nix-built static site and serve it with miniserve";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
+
     flake-utils.url = "github:numtide/flake-utils";
   };
 
-  outputs = { nixpkgs, flake-utils, ... }:
+  outputs = { self, nixpkgs, flake-utils }:
     flake-utils.lib.eachDefaultSystem (system:
       let
         pkgs = import nixpkgs {
@@ -26,15 +27,24 @@
 
             target="''${1:-.#default}"
 
-            nix build "$target"
+            echo "[watch] building $target"
+
+            out="$(
+              nix build \
+                --no-link \
+                --print-out-paths \
+                "$target"
+            )"
 
             mkdir -p .serve
 
             rsync \
               --archive \
               --delete \
-              result/ \
+              "$out/" \
               .serve/
+
+            echo "[watch] rebuilt"
           '';
         };
 
@@ -54,12 +64,22 @@
             port="''${PORT:-8080}"
 
             cleanup() {
-              kill "''${server_pid:-}" 2>/dev/null || true
+              if [ -n "''${server_pid:-}" ]; then
+                kill "$server_pid" 2>/dev/null || true
+              fi
             }
 
             trap cleanup EXIT INT TERM
 
+            #
+            # Initial build
+            #
             rebuild-site "$target"
+
+            #
+            # Start HTTP server
+            #
+            echo "[watch] serving http://localhost:$port"
 
             miniserve .serve \
               --port "$port" \
@@ -67,11 +87,19 @@
 
             server_pid=$!
 
+            #
+            # Watch source files.
+            #
+            # .serve must be ignored because rebuild-site writes into it.
+            #
             watchexec \
               --watch . \
-              --ignore .serve \
-              --ignore result \
-              --ignore .git \
+              --ignore '.serve' \
+              --ignore '.serve/**' \
+              --ignore 'result' \
+              --ignore 'result/**' \
+              --ignore '.git' \
+              --ignore '.git/**' \
               --ignore '*.swp' \
               --ignore '*~' \
               --debounce 100ms \
@@ -80,13 +108,29 @@
           '';
         };
       in {
-        packages.default = watch;
-        packages.watch = watch;
-        packages.rebuild = rebuild;
+        packages = {
+          default = watch;
 
-        apps.default = {
-          type = "app";
-          program = "${watch}/bin/watch";
+          inherit
+            watch
+            rebuild;
+        };
+
+        apps = {
+          default = {
+            type = "app";
+            program = "${watch}/bin/watch";
+          };
+
+          watch = {
+            type = "app";
+            program = "${watch}/bin/watch";
+          };
+
+          rebuild = {
+            type = "app";
+            program = "${rebuild}/bin/rebuild-site";
+          };
         };
       });
 }
